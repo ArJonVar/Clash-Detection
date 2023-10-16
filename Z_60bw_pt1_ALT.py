@@ -60,6 +60,23 @@ class ClashWork:
         df = df.fillna("")
 
         self.excel_source = df
+    def replace_path(self, input_string):
+        '''needed to make sure the model_key is recognized. Its tricky b/c the model key is based on this type of input: 
+        nwbim360://developer.api.autodesk.com/coord/v1/region/us/account/53193af9-42b4-4018-86f8-0e3f265a1dad/project/f0eeb601-51e2-4888-86e4-d90893cb98d8/container/f0eeb601-51e2-4888-86e4-d90893cb98d8/modelset/444bec68-629a-4412-8717-843473307b8c/model/dXJuOmFkc2sud2lwcHJvZDpkbS5saW5lYWdlOk41WVZPTEZJUXBtZC1Ub0pDa3FQT3c/name/TWVjaGFuaWNhbA.svf?explicit=true&type=.svf
+        which always ends ... name/TWVjaGFuaWNhbA.svf?explicit=true&type=.svf
+        but now DCPEs are using egnyte, such as C:\Egnyte\Shared\Digital Construction Team\00_Projects\FL_60 Blossom Way\01_Revit\WRNash Models\WRN- 60BW Plumbing.rvt
+        which we need to artificially end name/<last subsection of string after last slash>'''
+        adjusted_string = input_string
+        # If 'egnyte' is in the string after converting to lowercase
+        if 'egnyte' in input_string.lower():
+            # Find the last occurrence of "\"
+            last_slash_index = input_string.rfind("\\")
+            # If "\" was found
+            if last_slash_index != -1:
+                # Replace the last "\" with "\name\"
+                adjusted_string = input_string[:last_slash_index] + "\\name/" + input_string[(last_slash_index+1):]
+
+        return adjusted_string
     def transform_excel_source(self):
         '''Daniel requested that we extract the Element ID from the Item Id column, and add it to the Item Name column as <Item File Name> - <Element ID #>, we do so here for both items'''
         item_list = ['Item 1', 'Item 2']
@@ -70,11 +87,16 @@ class ClashWork:
             item_name_col = f'{item_number} - Item Name'
             item_file_name_col = f'{item_number} - Item File Name'
 
+            # Finds rows w elemnt
             mask = df[item_id_col].str.contains('Element ID:', na=False)
-            df.loc[mask, item_name_col] = df[item_file_name_col] + ' [' + df[item_id_col].str.extract('Element ID: (\d+)')[0] + ']'
+            df.loc[mask, item_name_col] = df[item_name_col] + ' [' + df[item_id_col].str.extract('Element ID: (\d+)')[0] + ']'
             
-            # adds name/ to the file name so that in discipline extractoin it can extract the key descriptor out
-            df[item_file_name_col] = df[item_file_name_col].str.replace("60BW_Plumbing_WRNash", "name/60BW_Plumbing_WRNash")
+            
+            # Apply the function on your DataFrame column
+            df[item_file_name_col] = df[item_file_name_col].apply(self.replace_path)
+
+            # # adds name/ to the file name so that in discipline extractoin it can extract the key descriptor out
+            # df[item_file_name_col] = df[item_file_name_col].str.replace("60BW_Plumbing_WRNash", "name/60BW_Plumbing_WRNash")
     def transformation_audit(self):
         '''check that it worked'''
         df = self.excel_source
@@ -105,22 +127,37 @@ class ClashWork:
         except KeyError:
             pass
         return uid_list
+    def clean_model_key(self, str):
+        '''DCPEs keep entering whole file names into the Model_key instead of what Torrie wanted (the section after last slash)
+        so this script returns just what Torrie designed to have returned'''
+        # If 'egnyte' is in the string after converting to lowercase
+        if 'egnyte' in str.lower():
+            # Split the string by "\" and take the last part
+            return str.split("\\")[-1]
+        return str  # Return the original string if 'egnyte' is not present
     def extract_discipline(self, column_name):
         '''extracts the discipline from one isolated component'''
-        file_name_list = []
+        self.failed_indexes = []
         df = self.excel_source
+        model_key_list = [self.clean_model_key(name) for name in self.model_key['Navis Source File Name'].values.tolist()]
         try:
-            file_names = df[column_name].str.extract(r'name/(.+)')
-            file_name_list.extend(file_names[0].values.tolist())
+            file_names_df = df[column_name].str.extract(r'name/(.+)').reset_index()
+            file_names_df.columns = ['original_index', 'file_name']
         except KeyError:
             pass
         discipline_list = []
-        for file in file_name_list:
-            if file in self.model_key['Navis Source File Name'].values.tolist():
-                code = self.model_key.loc[self.model_key["Navis Source File Name"] == file]['Code']
-                discipline_list.append(code.values.tolist()[0])
+        # for index, file in enumerate(file_name_list):
+        for _, row in file_names_df.iterrows():
+            index = row['original_index']
+            file = row['file_name']
+            if file in model_key_list:
+                # map value to model_key, by finding index of model_key_list item (cleaned by clean_model_key) and then grabbing the code of that index in model key .xlsx
+                index = model_key_list.index(file)
+                code = self.model_key.loc[index]['Code']
+                discipline_list.append(code)
             else:
-                # print(file)
+                self.failed_indexes.append(index)
+                self.file = file
                 discipline_list.append('X')
         return discipline_list
     def process_discipline(self, uid_list):
